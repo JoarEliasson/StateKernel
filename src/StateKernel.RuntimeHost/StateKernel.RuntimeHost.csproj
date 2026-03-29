@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\StateKernel.Simulation\StateKernel.Simulation.csproj" />
+    <ProjectReference Include="..\StateKernel.Runtime.Abstractions\StateKernel.Runtime.Abstractions.csproj" />
+    <ProjectReference Include="..\StateKernel.Observability\StateKernel.Observability.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\StateKernel.Domain\StateKernel.Domain.csproj" />
+    <ProjectReference Include="..\StateKernel.ProjectModel\StateKernel.ProjectModel.csproj" />
+    <ProjectReference Include="..\StateKernel.Runtime.Abstractions\StateKernel.Runtime.Abstractions.csproj" />
+    <ProjectReference Include="..\StateKernel.Observability\StateKernel.Observability.csproj" />
+    <ProjectReference Include="..\StateKernel.ProjectBundles\StateKernel.ProjectBundles.csproj" />
+    <ProjectReference Include="..\StateKernel.Benchmarks\StateKernel.Benchmarks.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="OPCFoundation.NetStandard.Opc.Ua.Client" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\StateKernel.ControlApi\StateKernel.ControlApi.csproj" />
+    <ProjectReference Include="..\..\src\StateKernel.Runtime.Abstractions\StateKernel.Runtime.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\StateKernel.Runtime.UaNet\StateKernel.Runtime.UaNet.csproj" />
+    <ProjectReference Include="..\..\src\StateKernel.RuntimeHost\StateKernel.RuntimeHost.csproj" />
+    <ProjectReference Include="..\..\src\StateKernel.Simulation\StateKernel.Simulation.csproj" />
+  </ItemGroup>
+</Project>

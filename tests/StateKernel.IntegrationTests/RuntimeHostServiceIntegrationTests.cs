@@ -12,14 +12,39 @@ public sealed class RuntimeHostServiceIntegrationTests
     private static readonly SimulationSignalId SecondarySignal = SimulationSignalId.From("Secondary");
 
     [Fact]
+    public void RuntimeHostStatus_EnforcesActiveInactiveAndFaultContracts()
+    {
+        var faultInfo = new RuntimeHostFaultInfo(
+            RuntimeHostFaultCodes.RuntimeStartFailed,
+            "Faulted host.",
+            DateTimeOffset.UtcNow);
+
+        Assert.False(RuntimeHostStatus.Inactive.IsRunning);
+        Assert.Null(RuntimeHostStatus.Inactive.LastFault);
+
+        var faultedStatus = RuntimeHostStatus.Faulted(faultInfo);
+
+        Assert.False(faultedStatus.IsRunning);
+        Assert.Equal(faultInfo, faultedStatus.LastFault);
+
+        var activeStatus = RuntimeHostStatus.Active(
+            "fake",
+            "opc.tcp://127.0.0.1:40123/fake",
+            RuntimeEndpointProfiles.LocalDevelopment.Id,
+            1);
+
+        Assert.True(activeStatus.IsRunning);
+        Assert.Null(activeStatus.LastFault);
+
+        Assert.Null(activeStatus.LastFault);
+    }
+
+    [Fact]
     public async Task RuntimeHostService_StartApplyStopFlow_ForwardsLifecycleAndUpdates()
     {
-        var factory = new FakeRuntimeAdapterFactory("fake");
+        var factory = new ConfigurableFakeRuntimeAdapterFactory();
         var host = new RuntimeHostService([factory]);
-        var request = new RuntimeStartRequest(
-            "fake",
-            CreateCompiledPlan(SourceSignal),
-            RuntimeEndpointSettings.Loopback());
+        var request = CreateStartRequest("fake", RuntimeEndpointProfiles.LocalDevelopment);
 
         var startResult = await host.StartAsync(request, CancellationToken.None);
         await host.ApplyUpdatesAsync(
@@ -31,20 +56,18 @@ public sealed class RuntimeHostServiceIntegrationTests
 
         Assert.Equal(1, factory.Adapter.StartCallCount);
         Assert.Single(factory.Adapter.AppliedBatches);
-        Assert.Equal("fake", startResult.EndpointUrl);
+        Assert.Equal("opc.tcp://127.0.0.1:40124/fake", startResult.EndpointUrl);
         Assert.Equal("fake", stopResult.AdapterKey);
         Assert.False(host.IsRunning);
+        Assert.Null(host.GetStatus().LastFault);
     }
 
     [Fact]
-    public async Task RuntimeHostService_RejectsInvalidLifecycleUsageAndUnprojectedSignals()
+    public async Task RuntimeHostService_InvalidLifecycleMisuseDoesNotRetainFaults()
     {
-        var factory = new FakeRuntimeAdapterFactory("fake");
+        var factory = new ConfigurableFakeRuntimeAdapterFactory();
         var host = new RuntimeHostService([factory]);
-        var request = new RuntimeStartRequest(
-            "fake",
-            CreateCompiledPlan(SourceSignal),
-            RuntimeEndpointSettings.Loopback());
+        var request = CreateStartRequest("fake", RuntimeEndpointProfiles.LocalDevelopment);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             host.ApplyUpdatesAsync(
@@ -52,19 +75,183 @@ public sealed class RuntimeHostServiceIntegrationTests
                     new RuntimeValueUpdate(SourceSignal, 1.0, 1),
                 ],
                 CancellationToken.None).AsTask());
+        Assert.Null(host.GetStatus().LastFault);
+
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             host.StopAsync(CancellationToken.None).AsTask());
+        Assert.Null(host.GetStatus().LastFault);
 
         _ = await host.StartAsync(request, CancellationToken.None);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             host.StartAsync(request, CancellationToken.None).AsTask());
+        Assert.Null(host.GetStatus().LastFault);
+
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             host.ApplyUpdatesAsync(
                 [
                     new RuntimeValueUpdate(SecondarySignal, 1.0, 1),
                 ],
                 CancellationToken.None).AsTask());
+        Assert.Null(host.GetStatus().LastFault);
+    }
+
+    [Fact]
+    public async Task RuntimeHostService_GetStatusUsesTheCanonicalRuntimeHostReadModel()
+    {
+        var factory = new ConfigurableFakeRuntimeAdapterFactory();
+        var host = new RuntimeHostService([factory]);
+        var inactiveStatus = host.GetStatus();
+        var request = CreateStartRequest("fake", RuntimeEndpointProfiles.LocalDevelopment);
+
+        Assert.False(inactiveStatus.IsRunning);
+        Assert.Null(inactiveStatus.ActiveAdapterKey);
+        Assert.Null(inactiveStatus.EndpointUrl);
+        Assert.Null(inactiveStatus.ActiveProfileId);
+        Assert.Null(inactiveStatus.ExposedNodeCount);
+        Assert.Null(inactiveStatus.LastFault);
+
+        var startResult = await host.StartAsync(request, CancellationToken.None);
+        var activeStatus = host.GetStatus();
+
+        Assert.True(activeStatus.IsRunning);
+        Assert.Equal("fake", activeStatus.ActiveAdapterKey);
+        Assert.Equal(startResult.EndpointUrl, activeStatus.EndpointUrl);
+        Assert.Equal(RuntimeEndpointProfiles.LocalDevelopment.Id, activeStatus.ActiveProfileId);
+        Assert.Equal(1, activeStatus.ExposedNodeCount);
+        Assert.Null(activeStatus.LastFault);
+
+        _ = await host.StopAsync(CancellationToken.None);
+
+        var stoppedStatus = host.GetStatus();
+
+        Assert.False(stoppedStatus.IsRunning);
+        Assert.Null(stoppedStatus.ActiveAdapterKey);
+        Assert.Null(stoppedStatus.EndpointUrl);
+        Assert.Null(stoppedStatus.ActiveProfileId);
+        Assert.Null(stoppedStatus.ExposedNodeCount);
+        Assert.Null(stoppedStatus.LastFault);
+    }
+
+    [Fact]
+    public async Task RuntimeHostService_RejectsUnsupportedEndpointProfilesBeforeAdapterStartupWithoutRetainingFaults()
+    {
+        var factory = new ConfigurableFakeRuntimeAdapterFactory(
+            supportedEndpointProfiles:
+            [
+                RuntimeEndpointProfiles.LocalDevelopment.Id,
+            ]);
+        var host = new RuntimeHostService([factory]);
+        var request = CreateStartRequest("fake", RuntimeEndpointProfiles.BaselineSecure);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            host.StartAsync(request, CancellationToken.None).AsTask());
+
+        Assert.Contains(RuntimeEndpointProfiles.BaselineSecure.Id.Value, exception.Message);
+        Assert.Equal(0, factory.Adapter.StartCallCount);
+        Assert.False(host.GetStatus().IsRunning);
+        Assert.Null(host.GetStatus().LastFault);
+    }
+
+    [Fact]
+    public async Task RuntimeHostService_StartFailure_LeavesInactiveFaultedState()
+    {
+        var factory = new ConfigurableFakeRuntimeAdapterFactory();
+        factory.Adapter.ThrowOnStartCallNumber = 1;
+        var host = new RuntimeHostService([factory]);
+
+        var exception = await Assert.ThrowsAsync<RuntimeHostFaultException>(() =>
+            host.StartAsync(
+                CreateStartRequest("fake", RuntimeEndpointProfiles.LocalDevelopment),
+                CancellationToken.None).AsTask());
+
+        var status = host.GetStatus();
+
+        Assert.Equal(RuntimeHostFaultCodes.RuntimeStartFailed, exception.FaultInfo.FaultCode);
+        Assert.False(status.IsRunning);
+        Assert.Null(status.ActiveAdapterKey);
+        Assert.Null(status.EndpointUrl);
+        Assert.Null(status.ActiveProfileId);
+        Assert.Null(status.ExposedNodeCount);
+        Assert.NotNull(status.LastFault);
+        Assert.Equal(RuntimeHostFaultCodes.RuntimeStartFailed, status.LastFault!.FaultCode);
+    }
+
+    [Fact]
+    public async Task RuntimeHostService_SecureStartFailure_LeavesInactiveFaultedStateAndSuccessfulRestartClearsFault()
+    {
+        var factory = new ConfigurableFakeRuntimeAdapterFactory();
+        factory.Adapter.ThrowOnStartCallNumber = 1;
+        var host = new RuntimeHostService([factory]);
+
+        _ = await Assert.ThrowsAsync<RuntimeHostFaultException>(() =>
+            host.StartAsync(
+                CreateStartRequest("fake", RuntimeEndpointProfiles.BaselineSecure),
+                CancellationToken.None).AsTask());
+
+        var faultedStatus = host.GetStatus();
+
+        Assert.False(faultedStatus.IsRunning);
+        Assert.NotNull(faultedStatus.LastFault);
+        Assert.Equal(RuntimeHostFaultCodes.SecureStartupFailed, faultedStatus.LastFault!.FaultCode);
+
+        var restartResult = await host.StartAsync(
+            CreateStartRequest("fake", RuntimeEndpointProfiles.LocalDevelopment),
+            CancellationToken.None);
+        var restartedStatus = host.GetStatus();
+
+        Assert.True(restartedStatus.IsRunning);
+        Assert.Equal(restartResult.EndpointUrl, restartedStatus.EndpointUrl);
+        Assert.Null(restartedStatus.LastFault);
+    }
+
+    [Fact]
+    public async Task RuntimeHostService_ApplyFailure_LeavesInactiveFaultedState()
+    {
+        var factory = new ConfigurableFakeRuntimeAdapterFactory();
+        factory.Adapter.ThrowOnApplyCallNumber = 1;
+        var host = new RuntimeHostService([factory]);
+
+        _ = await host.StartAsync(
+            CreateStartRequest("fake", RuntimeEndpointProfiles.LocalDevelopment),
+            CancellationToken.None);
+
+        var exception = await Assert.ThrowsAsync<RuntimeHostFaultException>(() =>
+            host.ApplyUpdatesAsync(
+                [
+                    new RuntimeValueUpdate(SourceSignal, 9.0, 1),
+                ],
+                CancellationToken.None).AsTask());
+
+        var status = host.GetStatus();
+
+        Assert.Equal(RuntimeHostFaultCodes.RuntimeApplyFailed, exception.FaultInfo.FaultCode);
+        Assert.False(status.IsRunning);
+        Assert.NotNull(status.LastFault);
+        Assert.Equal(RuntimeHostFaultCodes.RuntimeApplyFailed, status.LastFault!.FaultCode);
+        Assert.False(factory.Adapter.Started);
+    }
+
+    [Fact]
+    public async Task RuntimeHostService_StopFailure_LeavesInactiveFaultedState()
+    {
+        var factory = new ConfigurableFakeRuntimeAdapterFactory();
+        factory.Adapter.ThrowOnStopCallNumber = 1;
+        var host = new RuntimeHostService([factory]);
+
+        _ = await host.StartAsync(
+            CreateStartRequest("fake", RuntimeEndpointProfiles.LocalDevelopment),
+            CancellationToken.None);
+
+        var exception = await Assert.ThrowsAsync<RuntimeHostFaultException>(() =>
+            host.StopAsync(CancellationToken.None).AsTask());
+
+        var status = host.GetStatus();
+
+        Assert.Equal(RuntimeHostFaultCodes.RuntimeStopFailed, exception.FaultInfo.FaultCode);
+        Assert.False(status.IsRunning);
+        Assert.NotNull(status.LastFault);
+        Assert.Equal(RuntimeHostFaultCodes.RuntimeStopFailed, status.LastFault!.FaultCode);
     }
 
     [Fact]
@@ -106,6 +293,17 @@ public sealed class RuntimeHostServiceIntegrationTests
             });
     }
 
+    private static RuntimeStartRequest CreateStartRequest(
+        string adapterKey,
+        RuntimeEndpointProfile endpointProfile)
+    {
+        return new RuntimeStartRequest(
+            adapterKey,
+            CreateCompiledPlan(SourceSignal),
+            RuntimeEndpointSettings.Loopback(0),
+            endpointProfile);
+    }
+
     private static CompiledRuntimePlan CreateCompiledPlan(SimulationSignalId signalId)
     {
         return new CompiledRuntimePlan(
@@ -118,64 +316,5 @@ public sealed class RuntimeHostServiceIntegrationTests
     private static SimulationTick CreateTick(long sequenceNumber)
     {
         return new SimulationTick(sequenceNumber, TimeSpan.FromMilliseconds(sequenceNumber * 10));
-    }
-
-    private sealed class FakeRuntimeAdapterFactory : IRuntimeAdapterFactory
-    {
-        public FakeRuntimeAdapterFactory(string key)
-        {
-            Adapter = new FakeRuntimeAdapter(key);
-        }
-
-        public FakeRuntimeAdapter Adapter { get; }
-
-        public RuntimeAdapterDescriptor Descriptor => Adapter.Descriptor;
-
-        public IRuntimeAdapter CreateAdapter()
-        {
-            return Adapter;
-        }
-    }
-
-    private sealed class FakeRuntimeAdapter : IRuntimeAdapter
-    {
-        public FakeRuntimeAdapter(string key)
-        {
-            Descriptor = new RuntimeAdapterDescriptor(
-                key,
-                "Fake Adapter",
-                new RuntimeCapabilitySet([RuntimeCapability.ReadOnlyValueExposure]));
-        }
-
-        public List<IReadOnlyList<RuntimeValueUpdate>> AppliedBatches { get; } = [];
-
-        public RuntimeAdapterDescriptor Descriptor { get; }
-
-        public bool Started { get; private set; }
-
-        public int StartCallCount { get; private set; }
-
-        public ValueTask<RuntimeStartResult> StartAsync(
-            RuntimeStartRequest request,
-            CancellationToken cancellationToken)
-        {
-            Started = true;
-            StartCallCount++;
-            return ValueTask.FromResult(new RuntimeStartResult(Descriptor.Key, request.CompiledPlan.Bindings.Count));
-        }
-
-        public ValueTask ApplyUpdatesAsync(
-            IReadOnlyList<RuntimeValueUpdate> updates,
-            CancellationToken cancellationToken)
-        {
-            AppliedBatches.Add(updates.ToArray());
-            return ValueTask.CompletedTask;
-        }
-
-        public ValueTask<RuntimeStopResult> StopAsync(CancellationToken cancellationToken)
-        {
-            Started = false;
-            return ValueTask.FromResult(new RuntimeStopResult(Descriptor.Key));
-        }
     }
 }

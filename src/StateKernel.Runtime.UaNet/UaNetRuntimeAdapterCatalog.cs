@@ -10,6 +10,7 @@ public static class UaNetRuntimeAdapterCatalog
     private static readonly RuntimeCapability[] SupportedCapabilities =
     [
         RuntimeCapability.ReadOnlyValueExposure,
+        RuntimeCapability.SecurityProfiles,
     ];
 
     /// <summary>
@@ -18,5 +19,6 @@ public static class UaNetRuntimeAdapterCatalog
     public static RuntimeAdapterDescriptor Default { get; } = new(
         UaNetRuntimeConstants.AdapterKey,
         ".NET OPC UA Runtime Adapter",
-        new RuntimeCapabilitySet(SupportedCapabilities));
+        new RuntimeCapabilitySet(SupportedCapabilities),
+        RuntimeEndpointProfiles.All.Select(static profile => profile.Id));
 }

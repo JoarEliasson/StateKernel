@@ -15,11 +15,26 @@ namespace StateKernel.Runtime.UaNet;
 public sealed class UaNetRuntimeAdapter : IRuntimeAdapter
 {
     private static readonly ITelemetryContext Telemetry = DefaultTelemetry.Create(_ => { });
+    private readonly IUaNetEndpointSetVerifier endpointSetVerifier;
     private ApplicationInstance? application;
     private UaNetRuntimeServer? server;
     private CompiledRuntimePlan? compiledPlan;
     private string? endpointUrl;
     private string? configurationRootPath;
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="UaNetRuntimeAdapter" /> type.
+    /// </summary>
+    public UaNetRuntimeAdapter()
+        : this(new UaNetEndpointSetVerifier())
+    {
+    }
+
+    internal UaNetRuntimeAdapter(IUaNetEndpointSetVerifier endpointSetVerifier)
+    {
+        ArgumentNullException.ThrowIfNull(endpointSetVerifier);
+        this.endpointSetVerifier = endpointSetVerifier;
+    }
 
     /// <inheritdoc />
     public RuntimeAdapterDescriptor Descriptor => UaNetRuntimeAdapterCatalog.Default;
@@ -43,13 +58,21 @@ public sealed class UaNetRuntimeAdapter : IRuntimeAdapter
                 $"The UA .NET runtime adapter cannot start adapter key '{request.AdapterKey}'.");
         }
 
+        if (request.EndpointProfile.RequiresLoopbackEndpoint &&
+            !IsLoopbackHost(request.Endpoint.Host))
+        {
+            throw new InvalidOperationException(
+                $"Runtime endpoint/profile '{request.EndpointProfile.Id}' requires a loopback endpoint host. Provided host: '{request.Endpoint.Host}'.");
+        }
+
         var resolvedPort = request.Endpoint.Port == 0
-            ? GetAvailableLoopbackPort()
+            ? GetAvailablePort(request.Endpoint.Host)
             : request.Endpoint.Port;
         var resolvedEndpointUrl = $"opc.tcp://{request.Endpoint.Host}:{resolvedPort}{UaNetRuntimeConstants.EndpointPath}";
-        var configuration = await CreateApplicationConfigurationAsync(
+        var (configuration, startupRootPath) = await CreateApplicationConfigurationAsync(
             request.Endpoint.Host,
             resolvedEndpointUrl,
+            request.EndpointProfile,
             cancellationToken);
         var serverInstance = new UaNetRuntimeServer(request.CompiledPlan.Bindings);
         var applicationInstance = new ApplicationInstance(configuration, Telemetry)
@@ -58,18 +81,32 @@ public sealed class UaNetRuntimeAdapter : IRuntimeAdapter
             ApplicationType = ApplicationType.Server,
         };
 
-        await applicationInstance.CheckApplicationInstanceCertificatesAsync(
-            true,
-            2048,
-            cancellationToken);
-        await applicationInstance.StartAsync(serverInstance);
+        try
+        {
+            await applicationInstance.CheckApplicationInstanceCertificatesAsync(
+                true,
+                2048,
+                cancellationToken);
+            await applicationInstance.StartAsync(serverInstance);
+            await endpointSetVerifier.VerifyAsync(
+                configuration,
+                resolvedEndpointUrl,
+                request.EndpointProfile,
+                cancellationToken);
 
-        application = applicationInstance;
-        server = serverInstance;
-        compiledPlan = request.CompiledPlan;
-        endpointUrl = resolvedEndpointUrl;
+            application = applicationInstance;
+            server = serverInstance;
+            compiledPlan = request.CompiledPlan;
+            endpointUrl = resolvedEndpointUrl;
+            configurationRootPath = startupRootPath;
 
-        return new RuntimeStartResult(resolvedEndpointUrl, request.CompiledPlan.Bindings.Count);
+            return new RuntimeStartResult(resolvedEndpointUrl, request.CompiledPlan.Bindings.Count);
+        }
+        catch
+        {
+            await CleanupFailedStartAsync(applicationInstance, serverInstance, startupRootPath);
+            throw;
+        }
     }
 
     /// <inheritdoc />
@@ -127,21 +164,7 @@ public sealed class UaNetRuntimeAdapter : IRuntimeAdapter
             server = null;
             compiledPlan = null;
             endpointUrl = null;
-
-            if (configurationRootPath is not null && Directory.Exists(configurationRootPath))
-            {
-                try
-                {
-                    Directory.Delete(configurationRootPath, recursive: true);
-                }
-                catch (IOException)
-                {
-                }
-                catch (UnauthorizedAccessException)
-                {
-                }
-            }
-
+            DeleteConfigurationRootPath(configurationRootPath);
             configurationRootPath = null;
         }
 
@@ -149,94 +172,142 @@ public sealed class UaNetRuntimeAdapter : IRuntimeAdapter
         return new RuntimeStopResult(Descriptor.Key);
     }
 
-    private async Task<ApplicationConfiguration> CreateApplicationConfigurationAsync(
+    private static async Task<(ApplicationConfiguration Configuration, string ConfigurationRootPath)> CreateApplicationConfigurationAsync(
         string host,
         string resolvedEndpointUrl,
+        RuntimeEndpointProfile endpointProfile,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        configurationRootPath = Path.Combine(
+        var startupRootPath = Path.Combine(
             Path.GetTempPath(),
             "StateKernel",
             "UaNetRuntime",
             Guid.NewGuid().ToString("N"));
 
-        Directory.CreateDirectory(configurationRootPath);
+        Directory.CreateDirectory(startupRootPath);
 
-        var configuration = new ApplicationConfiguration
+        try
         {
-            ApplicationName = "StateKernel Runtime UA .NET",
-            ApplicationUri = $"urn:{host}:StateKernel:Runtime:UaNet",
-            ProductUri = "urn:statekernel:runtime:ua-net",
-            ApplicationType = ApplicationType.Server,
-            SecurityConfiguration = new SecurityConfiguration
+            var configuration = new ApplicationConfiguration
             {
-                ApplicationCertificate = new CertificateIdentifier
+                ApplicationName = "StateKernel Runtime UA .NET",
+                ApplicationUri = $"urn:{host}:StateKernel:Runtime:UaNet",
+                ProductUri = "urn:statekernel:runtime:ua-net",
+                ApplicationType = ApplicationType.Server,
+                SecurityConfiguration = new SecurityConfiguration
                 {
-                    StoreType = "Directory",
-                    StorePath = Path.Combine(configurationRootPath, "pki", "own"),
-                    SubjectName = "CN=StateKernel Runtime UA .NET",
-                },
-                TrustedIssuerCertificates = new CertificateTrustList
-                {
-                    StoreType = "Directory",
-                    StorePath = Path.Combine(configurationRootPath, "pki", "issuer"),
-                },
-                TrustedPeerCertificates = new CertificateTrustList
-                {
-                    StoreType = "Directory",
-                    StorePath = Path.Combine(configurationRootPath, "pki", "trusted"),
-                },
-                RejectedCertificateStore = new CertificateTrustList
-                {
-                    StoreType = "Directory",
-                    StorePath = Path.Combine(configurationRootPath, "pki", "rejected"),
-                },
-                AutoAcceptUntrustedCertificates = true,
-                RejectSHA1SignedCertificates = false,
-                MinimumCertificateKeySize = 2048,
-            },
-            TransportConfigurations = [],
-            TransportQuotas = new TransportQuotas
-            {
-                OperationTimeout = 15000,
-                MaxStringLength = 1_048_576,
-                MaxByteStringLength = 1_048_576,
-                MaxArrayLength = 65_535,
-                MaxMessageSize = 4 * 1024 * 1024,
-                MaxBufferSize = 65_535,
-                ChannelLifetime = 60_000,
-                SecurityTokenLifetime = 3_600_000,
-            },
-            ServerConfiguration = new ServerConfiguration
-            {
-                BaseAddresses = [resolvedEndpointUrl],
-                SecurityPolicies =
-                [
-                    new ServerSecurityPolicy
+                    ApplicationCertificate = new CertificateIdentifier
                     {
-                        SecurityMode = MessageSecurityMode.None,
-                        SecurityPolicyUri = SecurityPolicies.None,
+                        StoreType = "Directory",
+                        StorePath = Path.Combine(startupRootPath, "pki", "own"),
+                        SubjectName = "CN=StateKernel Runtime UA .NET",
                     },
-                ],
-                UserTokenPolicies =
-                [
-                    new UserTokenPolicy(UserTokenType.Anonymous),
-                ],
-            },
-            TraceConfiguration = new TraceConfiguration(),
-            DisableHiResClock = false,
-            Extensions = new XmlElementCollection(),
-        };
+                    TrustedIssuerCertificates = new CertificateTrustList
+                    {
+                        StoreType = "Directory",
+                        StorePath = Path.Combine(startupRootPath, "pki", "issuer"),
+                    },
+                    TrustedPeerCertificates = new CertificateTrustList
+                    {
+                        StoreType = "Directory",
+                        StorePath = Path.Combine(startupRootPath, "pki", "trusted"),
+                    },
+                    RejectedCertificateStore = new CertificateTrustList
+                    {
+                        StoreType = "Directory",
+                        StorePath = Path.Combine(startupRootPath, "pki", "rejected"),
+                    },
+                    AutoAcceptUntrustedCertificates = true,
+                    RejectSHA1SignedCertificates = false,
+                    MinimumCertificateKeySize = 2048,
+                },
+                TransportConfigurations = [],
+                TransportQuotas = new TransportQuotas
+                {
+                    OperationTimeout = 15000,
+                    MaxStringLength = 1_048_576,
+                    MaxByteStringLength = 1_048_576,
+                    MaxArrayLength = 65_535,
+                    MaxMessageSize = 4 * 1024 * 1024,
+                    MaxBufferSize = 65_535,
+                    ChannelLifetime = 60_000,
+                    SecurityTokenLifetime = 3_600_000,
+                },
+                ServerConfiguration = new ServerConfiguration
+                {
+                    BaseAddresses = [resolvedEndpointUrl],
+                    SecurityPolicies =
+                    [
+                        CreateServerSecurityPolicy(endpointProfile),
+                    ],
+                    UserTokenPolicies =
+                    [
+                        new UserTokenPolicy(UserTokenType.Anonymous),
+                    ],
+                },
+                TraceConfiguration = new TraceConfiguration(),
+                DisableHiResClock = false,
+                Extensions = new XmlElementCollection(),
+            };
 
-        await configuration.ValidateAsync(ApplicationType.Server, cancellationToken);
-        return configuration;
+            await configuration.ValidateAsync(ApplicationType.Server, cancellationToken);
+            return (configuration, startupRootPath);
+        }
+        catch
+        {
+            DeleteConfigurationRootPath(startupRootPath);
+            throw;
+        }
     }
 
-    private static int GetAvailableLoopbackPort()
+    private static async Task CleanupFailedStartAsync(
+        ApplicationInstance applicationInstance,
+        UaNetRuntimeServer serverInstance,
+        string configurationRootPath)
     {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
+        try
+        {
+            await applicationInstance.StopAsync();
+        }
+        catch
+        {
+        }
+        finally
+        {
+            serverInstance.Dispose();
+            DeleteConfigurationRootPath(configurationRootPath);
+        }
+    }
+
+    private static ServerSecurityPolicy CreateServerSecurityPolicy(RuntimeEndpointProfile endpointProfile)
+    {
+        ArgumentNullException.ThrowIfNull(endpointProfile);
+
+        return endpointProfile.Id.Value switch
+        {
+            "local-dev" => new ServerSecurityPolicy
+            {
+                SecurityMode = MessageSecurityMode.None,
+                SecurityPolicyUri = SecurityPolicies.None,
+            },
+            "baseline-secure" => new ServerSecurityPolicy
+            {
+                SecurityMode = MessageSecurityMode.SignAndEncrypt,
+                SecurityPolicyUri = SecurityPolicies.Basic256Sha256,
+            },
+            _ => throw new InvalidOperationException(
+                $"The UA .NET runtime adapter does not support endpoint/profile id '{endpointProfile.Id}'."),
+        };
+    }
+
+    private static int GetAvailablePort(string host)
+    {
+        var listenerAddress = IsLoopbackHost(host)
+            ? IPAddress.Loopback
+            : IPAddress.Any;
+        var listener = new TcpListener(listenerAddress, 0);
         listener.Start();
 
         try
@@ -246,6 +317,46 @@ public sealed class UaNetRuntimeAdapter : IRuntimeAdapter
         finally
         {
             listener.Stop();
+        }
+    }
+
+    private static bool IsLoopbackHost(string host)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(host);
+
+        var normalizedHost = host.Trim();
+
+        if (string.Equals(normalizedHost, "localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (normalizedHost.Length > 2 &&
+            normalizedHost[0] == '[' &&
+            normalizedHost[^1] == ']')
+        {
+            normalizedHost = normalizedHost[1..^1];
+        }
+
+        return IPAddress.TryParse(normalizedHost, out var address) && IPAddress.IsLoopback(address);
+    }
+
+    private static void DeleteConfigurationRootPath(string? rootPath)
+    {
+        if (rootPath is null || !Directory.Exists(rootPath))
+        {
+            return;
+        }
+
+        try
+        {
+            Directory.Delete(rootPath, recursive: true);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
         }
     }
 

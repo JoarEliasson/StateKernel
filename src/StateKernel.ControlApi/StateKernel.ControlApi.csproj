@@ -1,9 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
     <ProjectReference Include="..\StateKernel.Domain\StateKernel.Domain.csproj" />
     <ProjectReference Include="..\StateKernel.ProjectModel\StateKernel.ProjectModel.csproj" />
     <ProjectReference Include="..\StateKernel.Runtime.Abstractions\StateKernel.Runtime.Abstractions.csproj" />
+    <ProjectReference Include="..\StateKernel.RuntimeHost\StateKernel.RuntimeHost.csproj" />
+    <ProjectReference Include="..\StateKernel.Runtime.UaNet\StateKernel.Runtime.UaNet.csproj" />
     <ProjectReference Include="..\StateKernel.Observability\StateKernel.Observability.csproj" />
     <ProjectReference Include="..\StateKernel.ProjectBundles\StateKernel.ProjectBundles.csproj" />
     <ProjectReference Include="..\StateKernel.Benchmarks\StateKernel.Benchmarks.csproj" />

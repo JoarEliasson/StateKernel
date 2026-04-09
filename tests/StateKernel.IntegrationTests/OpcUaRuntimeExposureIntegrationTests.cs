@@ -3,6 +3,8 @@ using Opc.Ua;
 using Opc.Ua.Client;
 using Opc.Ua.Configuration;
 using StateKernel.Runtime.Abstractions;
+using StateKernel.Runtime.Abstractions.Composition;
+using StateKernel.Runtime.Abstractions.Selection;
 using StateKernel.Runtime.UaNet;
 using StateKernel.RuntimeHost.Hosting;
 using StateKernel.Simulation.Activation;
@@ -32,17 +34,24 @@ public sealed class OpcUaRuntimeExposureIntegrationTests
             signalStore,
             outputSink,
             modeController);
-        var compiledPlan = new CompiledRuntimePlan(
-            new RuntimeProjectionPlan(
+        var selectionResult = RuntimeSignalSelectionService.CreateSelections(
+            new RuntimeSignalSelectionRequest(
             [
-                new SimulationSignalProjection(SourceSignal, RuntimeNodeId.ForSignal(SourceSignal), "Source"),
+                new SimulationSignalExposureChoice(SourceSignal),
             ]));
+        var compositionResult = RuntimeCompositionService.Compose(
+            new RuntimeCompositionRequest(
+                UaNetRuntimeConstants.AdapterKey,
+                selectionResult.SignalSelections,
+                RuntimeCompositionDefaults.Baseline));
+        var compiledPlan = compositionResult.CompiledRuntimePlan;
         var host = new RuntimeHostService([new UaNetRuntimeAdapterFactory()]);
         var startResult = await host.StartAsync(
             new RuntimeStartRequest(
                 UaNetRuntimeConstants.AdapterKey,
                 compiledPlan,
-                RuntimeEndpointSettings.Loopback()),
+                RuntimeEndpointSettings.Loopback(),
+                RuntimeEndpointProfiles.LocalDevelopment),
             CancellationToken.None);
 
         try
@@ -55,7 +64,7 @@ public sealed class OpcUaRuntimeExposureIntegrationTests
 
             using var session = await ConnectAsync(startResult.EndpointUrl, CancellationToken.None);
             var value = await session.ReadValueAsync<double>(
-                CreateNodeId(session, RuntimeNodeId.ForSignal(SourceSignal)),
+                CreateNodeId(session, compositionResult.ProjectionPlan.Projections[0].TargetNodeId),
                 CancellationToken.None);
 
             Assert.Equal(5.0, value);

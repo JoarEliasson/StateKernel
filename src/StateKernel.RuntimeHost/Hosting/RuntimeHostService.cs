@@ -10,7 +10,7 @@ public sealed class RuntimeHostService
     private readonly Dictionary<string, IRuntimeAdapterFactory> factoriesByKey;
     private IRuntimeAdapter? activeAdapter;
     private CompiledRuntimePlan? activeCompiledPlan;
-    private RuntimeStartResult? activeStartResult;
+    private RuntimeHostStatus status = RuntimeHostStatus.Inactive;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="RuntimeHostService" /> type.
@@ -53,17 +53,26 @@ public sealed class RuntimeHostService
     /// <summary>
     /// Gets a value indicating whether a runtime adapter is currently active.
     /// </summary>
-    public bool IsRunning => activeAdapter is not null;
+    public bool IsRunning => status.IsRunning;
 
     /// <summary>
     /// Gets the active adapter key when a runtime adapter is running.
     /// </summary>
-    public string? ActiveAdapterKey => activeAdapter?.Descriptor.Key;
+    public string? ActiveAdapterKey => status.ActiveAdapterKey;
 
     /// <summary>
     /// Gets the active externally readable endpoint URL when a runtime adapter is running.
     /// </summary>
-    public string? EndpointUrl => activeStartResult?.EndpointUrl;
+    public string? EndpointUrl => status.EndpointUrl;
+
+    /// <summary>
+    /// Gets the canonical runtime host status snapshot.
+    /// </summary>
+    /// <returns>The canonical runtime host status snapshot.</returns>
+    public RuntimeHostStatus GetStatus()
+    {
+        return status;
+    }
 
     /// <summary>
     /// Starts one runtime adapter instance from the supplied start request.
@@ -76,6 +85,9 @@ public sealed class RuntimeHostService
     /// </exception>
     /// <exception cref="InvalidOperationException">
     /// Thrown when the host is already running or when the requested adapter key is unknown.
+    /// </exception>
+    /// <exception cref="RuntimeHostFaultException">
+    /// Thrown when adapter creation or startup fails internally.
     /// </exception>
     public async ValueTask<RuntimeStartResult> StartAsync(
         RuntimeStartRequest request,
@@ -95,14 +107,58 @@ public sealed class RuntimeHostService
                 $"No runtime adapter factory is registered for adapter key '{request.AdapterKey}'.");
         }
 
-        var adapter = factory.CreateAdapter();
-        var startResult = await adapter.StartAsync(request, cancellationToken);
+        if (!factory.Descriptor.SupportedEndpointProfiles.Contains(request.EndpointProfile.Id))
+        {
+            throw new InvalidOperationException(
+                $"Runtime adapter '{request.AdapterKey}' does not support endpoint/profile id '{request.EndpointProfile.Id}'.");
+        }
 
-        activeAdapter = adapter;
-        activeCompiledPlan = request.CompiledPlan;
-        activeStartResult = startResult;
+        IRuntimeAdapter adapter;
 
-        return startResult;
+        try
+        {
+            adapter = factory.CreateAdapter();
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            var faultInfo = CreateStartFaultInfo(request.EndpointProfile);
+            status = RuntimeHostStatus.Faulted(faultInfo);
+            throw new RuntimeHostFaultException(faultInfo, exception);
+        }
+
+        try
+        {
+            var startResult = await adapter.StartAsync(request, cancellationToken);
+
+            activeAdapter = adapter;
+            activeCompiledPlan = request.CompiledPlan;
+            status = RuntimeHostStatus.Active(
+                adapter.Descriptor.Key,
+                startResult.EndpointUrl,
+                request.EndpointProfile.Id,
+                startResult.ExposedNodeCount);
+
+            return startResult;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            await BestEffortStopAdapterAsync(adapter, CancellationToken.None);
+
+            activeAdapter = null;
+            activeCompiledPlan = null;
+
+            var faultInfo = CreateStartFaultInfo(request.EndpointProfile);
+            status = RuntimeHostStatus.Faulted(faultInfo);
+            throw new RuntimeHostFaultException(faultInfo, exception);
+        }
     }
 
     /// <summary>
@@ -120,7 +176,10 @@ public sealed class RuntimeHostService
     /// <exception cref="InvalidOperationException">
     /// Thrown when the host is not running or when the batch references unprojected signals.
     /// </exception>
-    public ValueTask ApplyUpdatesAsync(
+    /// <exception cref="RuntimeHostFaultException">
+    /// Thrown when the active adapter fails while applying the published update batch.
+    /// </exception>
+    public async ValueTask ApplyUpdatesAsync(
         IReadOnlyList<RuntimeValueUpdate> updates,
         CancellationToken cancellationToken)
     {
@@ -141,7 +200,7 @@ public sealed class RuntimeHostService
 
         if (updates.Count == 0)
         {
-            return ValueTask.CompletedTask;
+            return;
         }
 
         var unknownUpdate = updates.FirstOrDefault(
@@ -153,7 +212,27 @@ public sealed class RuntimeHostService
                 $"Runtime update batches cannot reference unprojected signals. Unknown signal id: '{unknownUpdate.SourceSignalId}'.");
         }
 
-        return activeAdapter.ApplyUpdatesAsync(updates, cancellationToken);
+        var adapter = activeAdapter;
+
+        try
+        {
+            await adapter.ApplyUpdatesAsync(updates, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            await BestEffortStopAdapterAsync(adapter, CancellationToken.None);
+            ClearActiveState();
+
+            var faultInfo = CreateFaultInfo(
+                RuntimeHostFaultCodes.RuntimeApplyFailed,
+                "The runtime adapter failed while applying published value updates.");
+            status = RuntimeHostStatus.Faulted(faultInfo);
+            throw new RuntimeHostFaultException(faultInfo, exception);
+        }
     }
 
     /// <summary>
@@ -164,6 +243,9 @@ public sealed class RuntimeHostService
     /// <exception cref="InvalidOperationException">
     /// Thrown when the host is not currently running.
     /// </exception>
+    /// <exception cref="RuntimeHostFaultException">
+    /// Thrown when the active adapter fails while stopping.
+    /// </exception>
     public async ValueTask<RuntimeStopResult> StopAsync(CancellationToken cancellationToken)
     {
         if (activeAdapter is null)
@@ -173,12 +255,72 @@ public sealed class RuntimeHostService
         }
 
         var adapter = activeAdapter;
-        var stopResult = await adapter.StopAsync(cancellationToken);
 
+        try
+        {
+            var stopResult = await adapter.StopAsync(cancellationToken);
+            ClearActiveState();
+            status = RuntimeHostStatus.Inactive;
+            return stopResult;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            ClearActiveState();
+
+            var faultInfo = CreateFaultInfo(
+                RuntimeHostFaultCodes.RuntimeStopFailed,
+                "The runtime adapter failed while stopping.");
+            status = RuntimeHostStatus.Faulted(faultInfo);
+            throw new RuntimeHostFaultException(faultInfo, exception);
+        }
+    }
+
+    private static async Task BestEffortStopAdapterAsync(
+        IRuntimeAdapter adapter,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            _ = await adapter.StopAsync(cancellationToken);
+        }
+        catch
+        {
+        }
+    }
+
+    private static RuntimeHostFaultInfo CreateFaultInfo(
+        string faultCode,
+        string message)
+    {
+        return new RuntimeHostFaultInfo(
+            faultCode,
+            message,
+            DateTimeOffset.UtcNow);
+    }
+
+    private static RuntimeHostFaultInfo CreateStartFaultInfo(RuntimeEndpointProfile endpointProfile)
+    {
+        ArgumentNullException.ThrowIfNull(endpointProfile);
+
+        if (endpointProfile.Id == RuntimeEndpointProfiles.BaselineSecure.Id)
+        {
+            return CreateFaultInfo(
+                RuntimeHostFaultCodes.SecureStartupFailed,
+                "The runtime adapter could not realize the requested secure endpoint/profile.");
+        }
+
+        return CreateFaultInfo(
+            RuntimeHostFaultCodes.RuntimeStartFailed,
+            "The runtime adapter could not start.");
+    }
+
+    private void ClearActiveState()
+    {
         activeAdapter = null;
         activeCompiledPlan = null;
-        activeStartResult = null;
-
-        return stopResult;
     }
 }

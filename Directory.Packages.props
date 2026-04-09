@@ -5,6 +5,7 @@
 
   <ItemGroup>
     <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="9.0.6" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.2" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
     <PackageVersion Include="OPCFoundation.NetStandard.Opc.Ua.Client" Version="1.5.378.134" />
     <PackageVersion Include="OPCFoundation.NetStandard.Opc.Ua.Server" Version="1.5.378.134" />

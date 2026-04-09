@@ -10,25 +10,30 @@ public sealed class RuntimeStartRequest
     /// </summary>
     /// <param name="adapterKey">The stable adapter key to start.</param>
     /// <param name="compiledPlan">The compiled runtime plan describing what to expose.</param>
-    /// <param name="endpoint">The loopback endpoint settings used for hosting.</param>
+    /// <param name="endpoint">The endpoint settings used for hosting.</param>
+    /// <param name="endpointProfile">The bounded endpoint/security profile to apply at startup.</param>
     /// <exception cref="ArgumentException">
     /// Thrown when <paramref name="adapterKey" /> is null, empty, or whitespace.
     /// </exception>
     /// <exception cref="ArgumentNullException">
-    /// Thrown when <paramref name="compiledPlan" /> or <paramref name="endpoint" /> is null.
+    /// Thrown when <paramref name="compiledPlan" />, <paramref name="endpoint" />, or
+    /// <paramref name="endpointProfile" /> is null.
     /// </exception>
     public RuntimeStartRequest(
         string adapterKey,
         CompiledRuntimePlan compiledPlan,
-        RuntimeEndpointSettings endpoint)
+        RuntimeEndpointSettings endpoint,
+        RuntimeEndpointProfile endpointProfile)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(adapterKey);
         ArgumentNullException.ThrowIfNull(compiledPlan);
         ArgumentNullException.ThrowIfNull(endpoint);
+        ArgumentNullException.ThrowIfNull(endpointProfile);
 
         AdapterKey = adapterKey.Trim();
         CompiledPlan = compiledPlan;
         Endpoint = endpoint;
+        EndpointProfile = endpointProfile;
     }
 
     /// <summary>
@@ -42,7 +47,12 @@ public sealed class RuntimeStartRequest
     public CompiledRuntimePlan CompiledPlan { get; }
 
     /// <summary>
-    /// Gets the loopback endpoint settings used for hosting.
+    /// Gets the endpoint settings used for hosting.
     /// </summary>
     public RuntimeEndpointSettings Endpoint { get; }
+
+    /// <summary>
+    /// Gets the bounded endpoint/security profile to apply at startup.
+    /// </summary>
+    public RuntimeEndpointProfile EndpointProfile { get; }
 }

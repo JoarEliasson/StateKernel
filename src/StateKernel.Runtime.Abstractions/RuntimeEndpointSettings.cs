@@ -1,14 +1,14 @@
 namespace StateKernel.Runtime.Abstractions;
 
 /// <summary>
-/// Defines the loopback endpoint settings used to host a runtime adapter.
+/// Defines the endpoint host settings used to host a runtime adapter.
 /// </summary>
 public sealed class RuntimeEndpointSettings
 {
     /// <summary>
     /// Initializes a new instance of the <see cref="RuntimeEndpointSettings" /> type.
     /// </summary>
-    /// <param name="host">The loopback host name or address.</param>
+    /// <param name="host">The endpoint host name or address.</param>
     /// <param name="port">
     /// The TCP port to bind. A value of <c>0</c> requests a test-friendly dynamically resolved port.
     /// </param>
@@ -34,7 +34,7 @@ public sealed class RuntimeEndpointSettings
     }
 
     /// <summary>
-    /// Gets the loopback host name or address.
+    /// Gets the endpoint host name or address.
     /// </summary>
     public string Host { get; }
 

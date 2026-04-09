@@ -12,6 +12,10 @@ public sealed class UaNetRuntimeAdapterCatalogTests
 
         Assert.Equal("ua-net", descriptor.Key);
         Assert.True(descriptor.Capabilities.Supports(RuntimeCapability.ReadOnlyValueExposure));
-        Assert.False(descriptor.Capabilities.Supports(RuntimeCapability.SecurityProfiles));
+        Assert.True(descriptor.Capabilities.Supports(RuntimeCapability.SecurityProfiles));
+        Assert.Collection(
+            descriptor.SupportedEndpointProfiles,
+            profileId => Assert.Equal("baseline-secure", profileId.Value),
+            profileId => Assert.Equal("local-dev", profileId.Value));
     }
 }

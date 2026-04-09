@@ -1,6 +1,6 @@
 # StateKernel
 
-![StateKernel](assets/brand/statekernel-logo-primary.png)
+<img src="assets/brand/statekernel-logo-primary.png" alt="StateKernel" width="420" />
 
 StateKernel is a local-first OPC UA scenario studio for deterministic integration testing, security-profile comparison, and benchmark-grade observability.
 
@@ -11,7 +11,11 @@ The repository now contains a working deterministic simulation kernel plus a fir
 - a deterministic clock, seed boundary, scheduler, and behavior execution model
 - explicit activation, operating-mode control, and formal state-machine coordination
 - committed-snapshot signals, derived-value behaviors, dependency planning, and timing diagnostics
-- a runtime abstraction seam, runtime host, and a read-only OPC UA server adapter that can expose selected simulation signals to a real OPC UA client
+- a runtime abstraction seam, a simulation-to-runtime selection layer, a deterministic runtime composition layer, a runtime host, and a read-only OPC UA server adapter that can expose selected simulation signals to a real OPC UA client
+- two bounded runtime endpoint/security profiles: `local-dev` for low-friction loopback work and `baseline-secure` for a verified secure-only OPC UA startup posture
+- a baseline run/execution orchestration seam that owns one active deterministic run, explicit run status, and runtime publication from committed snapshots
+- tightened runtime/run lifecycle contracts with bounded retained fault readback and explicit active/inactive/faulted status semantics
+- a minimal ASP.NET Core control API that can start, stop, and report both runtime lifecycle and run lifecycle through the accepted seams, including bounded fault visibility
 
 The simulation core remains runtime-agnostic. Runtime adapters consume already-computed simulation outputs after deterministic advancement rather than owning simulation execution.
 
@@ -41,10 +45,10 @@ dotnet run --project src/StateKernel.RuntimeHost
 ## Solution Map
 
 - `StateKernel.Simulation` is the deterministic, runtime-agnostic execution core.
-- `StateKernel.Runtime.Abstractions` defines runtime lifecycle, projection, and value-update contracts.
-- `StateKernel.RuntimeHost` owns runtime adapter lifecycle and projects committed signal snapshots into runtime updates.
-- `StateKernel.Runtime.UaNet` is the first concrete .NET OPC UA adapter path for read-only signal exposure.
-- `StateKernel.ControlApi` hosts the ASP.NET Core control plane.
+- `StateKernel.Runtime.Abstractions` defines runtime lifecycle, selection, composition, projection, and value-update contracts.
+- `StateKernel.RuntimeHost` owns runtime adapter lifecycle, explicit run/execution orchestration, and projection of committed signal snapshots into runtime updates.
+- `StateKernel.Runtime.UaNet` is the first concrete .NET OPC UA adapter path for read-only signal exposure and bounded endpoint/security profiles.
+- `StateKernel.ControlApi` hosts the ASP.NET Core control plane for runtime start/stop/status and run start/stop/status orchestration.
 - `StateKernel.Observability`, `StateKernel.Benchmarks`, `StateKernel.NodeSet`, and `StateKernel.ProjectBundles` provide the surrounding product subsystems.
 
 ## Documentation

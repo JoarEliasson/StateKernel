@@ -104,10 +104,12 @@ public sealed class RuntimeProjectionPlanTests
     public void RuntimeAdapterDescriptors_RejectInvalidInputs()
     {
         Assert.ThrowsAny<ArgumentException>(() =>
-            new RuntimeAdapterDescriptor(string.Empty, "UA", RuntimeCapabilitySet.Empty));
+            new RuntimeAdapterDescriptor(string.Empty, "UA", RuntimeCapabilitySet.Empty, [RuntimeEndpointProfiles.LocalDevelopment.Id]));
         Assert.ThrowsAny<ArgumentException>(() =>
-            new RuntimeAdapterDescriptor("ua-net", " ", RuntimeCapabilitySet.Empty));
+            new RuntimeAdapterDescriptor("ua-net", " ", RuntimeCapabilitySet.Empty, [RuntimeEndpointProfiles.LocalDevelopment.Id]));
         Assert.Throws<ArgumentNullException>(() =>
-            new RuntimeAdapterDescriptor("ua-net", "UA", null!));
+            new RuntimeAdapterDescriptor("ua-net", "UA", null!, [RuntimeEndpointProfiles.LocalDevelopment.Id]));
+        Assert.Throws<ArgumentNullException>(() =>
+            new RuntimeAdapterDescriptor("ua-net", "UA", RuntimeCapabilitySet.Empty, null!));
     }
 }

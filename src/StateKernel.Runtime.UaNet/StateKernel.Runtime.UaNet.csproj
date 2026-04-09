@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <PackageReference Include="OPCFoundation.NetStandard.Opc.Ua.Client" />
     <ProjectReference Include="..\StateKernel.Runtime.Abstractions\StateKernel.Runtime.Abstractions.csproj" />
     <PackageReference Include="OPCFoundation.NetStandard.Opc.Ua.Server" />
   </ItemGroup>

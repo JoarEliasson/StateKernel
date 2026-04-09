@@ -195,7 +195,114 @@ public sealed class UaNetRuntimeAdapterTests
         }
     }
 
-    private static RuntimeStartRequest CreateStartRequest(string displayName = "Source")
+    [Fact]
+    public async Task Adapter_StartsWithLocalDevelopmentProfileAndResolvesAnActualPortWhenRequested()
+    {
+        var adapter = new UaNetRuntimeAdapter();
+        var request = CreateStartRequest(
+            endpoint: RuntimeEndpointSettings.Loopback(0),
+            endpointProfile: RuntimeEndpointProfiles.LocalDevelopment);
+
+        var startResult = await adapter.StartAsync(request, CancellationToken.None);
+
+        try
+        {
+            var endpointUri = new Uri(startResult.EndpointUrl);
+
+            Assert.True(endpointUri.Port > 0);
+            Assert.Equal("127.0.0.1", endpointUri.Host);
+        }
+        finally
+        {
+            await adapter.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task Adapter_StartsWithBaselineSecureProfileAndExposesOnlySecureEndpoints()
+    {
+        var adapter = new UaNetRuntimeAdapter();
+        var request = CreateStartRequest(
+            endpointProfile: RuntimeEndpointProfiles.BaselineSecure);
+        var startResult = await adapter.StartAsync(request, CancellationToken.None);
+
+        try
+        {
+            var endpoints = await DiscoverEndpointsAsync(startResult.EndpointUrl, CancellationToken.None);
+
+            Assert.NotEmpty(endpoints);
+            Assert.Contains(
+                endpoints,
+                endpoint => endpoint.SecurityMode == MessageSecurityMode.SignAndEncrypt &&
+                    string.Equals(endpoint.SecurityPolicyUri, SecurityPolicies.Basic256Sha256, StringComparison.Ordinal));
+            Assert.DoesNotContain(
+                endpoints,
+                endpoint => endpoint.SecurityMode == MessageSecurityMode.None ||
+                    string.Equals(endpoint.SecurityPolicyUri, SecurityPolicies.None, StringComparison.Ordinal));
+        }
+        finally
+        {
+            await adapter.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task Adapter_SecureVerificationFailureLeavesTheAdapterInactiveAndAllowsCleanSecureRestart()
+    {
+        var adapter = new UaNetRuntimeAdapter(new OneShotFailingSecureVerifier());
+        var request = CreateStartRequest(
+            endpointProfile: RuntimeEndpointProfiles.BaselineSecure);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            adapter.StartAsync(request, CancellationToken.None).AsTask());
+
+        Assert.Contains("Configured secure verification failure", exception.Message);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            adapter.StopAsync(CancellationToken.None).AsTask());
+
+        var restartResult = await adapter.StartAsync(request, CancellationToken.None);
+
+        try
+        {
+            var endpoints = await DiscoverEndpointsAsync(restartResult.EndpointUrl, CancellationToken.None);
+
+            Assert.NotEmpty(endpoints);
+            Assert.All(
+                endpoints,
+                endpoint =>
+                {
+                    Assert.Equal(MessageSecurityMode.SignAndEncrypt, endpoint.SecurityMode);
+                    Assert.Equal(SecurityPolicies.Basic256Sha256, endpoint.SecurityPolicyUri);
+                });
+        }
+        finally
+        {
+            await adapter.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task Adapter_RejectsUnsupportedEndpointProfilesClearly()
+    {
+        var adapter = new UaNetRuntimeAdapter();
+        var request = CreateStartRequest(
+            endpointProfile: new RuntimeEndpointProfile(
+                RuntimeEndpointProfileId.From("custom"),
+                "Custom",
+                RuntimeSecurityMode.None,
+                RuntimeSecurityPolicy.None,
+                true));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            adapter.StartAsync(request, CancellationToken.None).AsTask());
+
+        Assert.Contains("custom", exception.Message);
+    }
+
+    private static RuntimeStartRequest CreateStartRequest(
+        string displayName = "Source",
+        RuntimeEndpointSettings? endpoint = null,
+        RuntimeEndpointProfile? endpointProfile = null)
     {
         var projectionPlan = new RuntimeProjectionPlan(
         [
@@ -208,72 +315,18 @@ public sealed class UaNetRuntimeAdapterTests
         return new RuntimeStartRequest(
             UaNetRuntimeConstants.AdapterKey,
             new CompiledRuntimePlan(projectionPlan),
-            RuntimeEndpointSettings.Loopback());
+            endpoint ?? RuntimeEndpointSettings.Loopback(),
+            endpointProfile ?? RuntimeEndpointProfiles.LocalDevelopment);
     }
 
     private static async Task<ISession> ConnectAsync(
         string endpointUrl,
         CancellationToken cancellationToken)
     {
-        var configurationRootPath = Path.Combine(
-            Path.GetTempPath(),
-            "StateKernel",
+        var configuration = await CreateClientConfigurationAsync(
             "UaNetClientTests",
-            Guid.NewGuid().ToString("N"));
-
-        Directory.CreateDirectory(configurationRootPath);
-
-        var configuration = new ApplicationConfiguration(Telemetry)
-        {
-            ApplicationName = "StateKernel UA Runtime Test Client",
-            ApplicationUri = "urn:statekernel:tests:ua-client",
-            ProductUri = "urn:statekernel:tests:ua-client",
-            ApplicationType = ApplicationType.Client,
-            SecurityConfiguration = new SecurityConfiguration
-            {
-                ApplicationCertificate = new CertificateIdentifier
-                {
-                    StoreType = "Directory",
-                    StorePath = Path.Combine(configurationRootPath, "pki", "own"),
-                    SubjectName = "CN=StateKernel UA Runtime Test Client",
-                },
-                TrustedIssuerCertificates = new CertificateTrustList
-                {
-                    StoreType = "Directory",
-                    StorePath = Path.Combine(configurationRootPath, "pki", "issuer"),
-                },
-                TrustedPeerCertificates = new CertificateTrustList
-                {
-                    StoreType = "Directory",
-                    StorePath = Path.Combine(configurationRootPath, "pki", "trusted"),
-                },
-                RejectedCertificateStore = new CertificateTrustList
-                {
-                    StoreType = "Directory",
-                    StorePath = Path.Combine(configurationRootPath, "pki", "rejected"),
-                },
-                AutoAcceptUntrustedCertificates = true,
-                RejectSHA1SignedCertificates = false,
-                MinimumCertificateKeySize = 2048,
-            },
-            TransportConfigurations = [],
-            TransportQuotas = new TransportQuotas(),
-            ClientConfiguration = new ClientConfiguration(),
-            TraceConfiguration = new TraceConfiguration(),
-            Extensions = new XmlElementCollection(),
-        };
-
-        await configuration.ValidateAsync(ApplicationType.Client, cancellationToken);
-
-        var application = new ApplicationInstance(configuration, Telemetry)
-        {
-            ApplicationName = "StateKernel UA Runtime Test Client",
-            ApplicationType = ApplicationType.Client,
-        };
-
-        await application.CheckApplicationInstanceCertificatesAsync(
-            true,
-            2048,
+            "StateKernel UA Runtime Test Client",
+            "urn:statekernel:tests:ua-client",
             cancellationToken);
 
         Exception? lastException = null;
@@ -318,10 +371,141 @@ public sealed class UaNetRuntimeAdapterTests
         throw lastException ?? new InvalidOperationException("The UA test client could not connect to the runtime server.");
     }
 
+    private static async Task<EndpointDescriptionCollection> DiscoverEndpointsAsync(
+        string endpointUrl,
+        CancellationToken cancellationToken)
+    {
+        var configuration = await CreateClientConfigurationAsync(
+            "UaNetDiscoveryTests",
+            "StateKernel UA Runtime Discovery Client",
+            "urn:statekernel:tests:ua-discovery",
+            cancellationToken);
+
+        Exception? lastException = null;
+
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                using var discoveryClient = await DiscoveryClient.CreateAsync(
+                    configuration,
+                    new Uri(endpointUrl),
+                    DiagnosticsMasks.None,
+                    cancellationToken);
+
+                return await discoveryClient.GetEndpointsAsync(null, cancellationToken);
+            }
+            catch (Exception exception) when (attempt < 19)
+            {
+                lastException = exception;
+                await Task.Delay(100, cancellationToken);
+            }
+        }
+
+        throw lastException ?? new InvalidOperationException("The UA discovery client could not enumerate runtime endpoints.");
+    }
+
+    private static async Task<ApplicationConfiguration> CreateClientConfigurationAsync(
+        string configurationFolderName,
+        string applicationName,
+        string applicationUri,
+        CancellationToken cancellationToken)
+    {
+        var configurationRootPath = Path.Combine(
+            Path.GetTempPath(),
+            "StateKernel",
+            configurationFolderName,
+            Guid.NewGuid().ToString("N"));
+
+        Directory.CreateDirectory(configurationRootPath);
+
+        var configuration = new ApplicationConfiguration(Telemetry)
+        {
+            ApplicationName = applicationName,
+            ApplicationUri = applicationUri,
+            ProductUri = applicationUri,
+            ApplicationType = ApplicationType.Client,
+            SecurityConfiguration = new SecurityConfiguration
+            {
+                ApplicationCertificate = new CertificateIdentifier
+                {
+                    StoreType = "Directory",
+                    StorePath = Path.Combine(configurationRootPath, "pki", "own"),
+                    SubjectName = $"CN={applicationName}",
+                },
+                TrustedIssuerCertificates = new CertificateTrustList
+                {
+                    StoreType = "Directory",
+                    StorePath = Path.Combine(configurationRootPath, "pki", "issuer"),
+                },
+                TrustedPeerCertificates = new CertificateTrustList
+                {
+                    StoreType = "Directory",
+                    StorePath = Path.Combine(configurationRootPath, "pki", "trusted"),
+                },
+                RejectedCertificateStore = new CertificateTrustList
+                {
+                    StoreType = "Directory",
+                    StorePath = Path.Combine(configurationRootPath, "pki", "rejected"),
+                },
+                AutoAcceptUntrustedCertificates = true,
+                RejectSHA1SignedCertificates = false,
+                MinimumCertificateKeySize = 2048,
+            },
+            TransportConfigurations = [],
+            TransportQuotas = new TransportQuotas(),
+            ClientConfiguration = new ClientConfiguration(),
+            TraceConfiguration = new TraceConfiguration(),
+            Extensions = new XmlElementCollection(),
+        };
+
+        await configuration.ValidateAsync(ApplicationType.Client, cancellationToken);
+
+        var application = new ApplicationInstance(configuration, Telemetry)
+        {
+            ApplicationName = applicationName,
+            ApplicationType = ApplicationType.Client,
+        };
+
+        await application.CheckApplicationInstanceCertificatesAsync(
+            true,
+            2048,
+            cancellationToken);
+
+        return configuration;
+    }
+
     private static NodeId CreateNodeId(ISession session, RuntimeNodeId runtimeNodeId)
     {
         var expandedNodeId = ExpandedNodeId.Parse(
             $"nsu={UaNetRuntimeConstants.NamespaceUri};s={runtimeNodeId.Value}");
         return ExpandedNodeId.ToNodeId(expandedNodeId, session.NamespaceUris)!;
+    }
+
+    private sealed class OneShotFailingSecureVerifier : IUaNetEndpointSetVerifier
+    {
+        private readonly UaNetEndpointSetVerifier innerVerifier = new();
+        private int secureVerificationCount;
+
+        public async ValueTask VerifyAsync(
+            ApplicationConfiguration configuration,
+            string endpointUrl,
+            RuntimeEndpointProfile endpointProfile,
+            CancellationToken cancellationToken)
+        {
+            if (endpointProfile.Id == RuntimeEndpointProfiles.BaselineSecure.Id &&
+                Interlocked.Increment(ref secureVerificationCount) == 1)
+            {
+                throw new InvalidOperationException("Configured secure verification failure.");
+            }
+
+            await innerVerifier.VerifyAsync(
+                configuration,
+                endpointUrl,
+                endpointProfile,
+                cancellationToken);
+        }
     }
 }
